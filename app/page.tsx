@@ -88,28 +88,40 @@ export default function BridgifyDashboard() {
     return total.toFixed(2);
   }, [rates]);
 
+  // Define balance type for better type safety
+  type BalanceType = {
+    [key: string]: string;
+    eth: string;
+    usdc: string;
+    usd: string;
+  };
+
   // Calculate total balance from orders
-  const calculateBalanceFromOrders = useCallback((orders: any[]) => {
-    const newBalance = {
+  const calculateBalanceFromOrders = useCallback((orders: any[]): BalanceType => {
+    // Initialize with default values
+    const newBalance: BalanceType = {
       eth: '0',
       usdc: '0',
-      usd: '0',
-      // Add other currencies as needed
+      usd: '0'
     };
 
     // Process all orders to calculate current balances
     orders.forEach(order => {
-      const cryptoKey = order.crypto_currency.toLowerCase();
-      const amount = order.crypto_amount;
+      const cryptoKey = order.crypto_currency?.toLowerCase() as keyof BalanceType;
+      const amount = parseFloat(order.crypto_amount || '0');
+      
+      if (!cryptoKey || isNaN(amount)) return;
+      
+      const currentBalance = parseFloat(newBalance[cryptoKey] || '0');
       
       if (order.order_type === 'buy') {
-        newBalance[cryptoKey] = (parseFloat(newBalance[cryptoKey] || '0') + amount).toFixed(6);
+        newBalance[cryptoKey] = (currentBalance + amount).toFixed(6);
       } else if (order.order_type === 'sell') {
-        newBalance[cryptoKey] = Math.max(0, parseFloat(newBalance[cryptoKey] || '0') - amount).toFixed(6);
+        newBalance[cryptoKey] = Math.max(0, currentBalance - amount).toFixed(6);
       }
     });
 
-    // Calculate total portfolio value
+    // Calculate total portfolio value in USD
     const totalValue = calculatePortfolioValue(newBalance);
     newBalance.usd = totalValue;
     
@@ -121,32 +133,80 @@ export default function BridgifyDashboard() {
     return newBalance;
   }, [calculatePortfolioValue]);
 
-  // Update balance when orders change
-  useEffect(() => {
-    if (orders.length > 0) {
-      const newBalance = calculateBalanceFromOrders(orders);
-      setBalance(prev => ({
-        ...prev,
-        ...newBalance
-      }));
-    }
-  }, [orders, calculateBalanceFromOrders]);
+  // Get orders for the current wallet
+  const { orders: currentOrders, isLoading: isLoadingOrders } = useOrders(walletAddress);
 
-  // Wrapper function to create an order
+  // Update balance when orders change or when wallet connects
+  useEffect(() => {
+    if (!isWalletConnected) return;
+    
+    const updateBalance = () => {
+      // Always calculate balance from orders first if available
+      if (currentOrders && currentOrders.length > 0) {
+        const newBalance = calculateBalanceFromOrders(currentOrders);
+        console.log('Updating balance from orders:', newBalance);
+        
+        // Update the main balance state with calculated values
+        setBalance(prev => ({
+          eth: newBalance.eth || '0',
+          usdc: newBalance.usdc || '0',
+          usd: newBalance.usd || '0'
+        }));
+        
+        // Update ETH balance display
+        const ethValue = newBalance.eth || '0';
+        setEthBalance(parseFloat(ethValue).toFixed(4));
+        
+        // Save to localStorage for persistence
+        localStorage.setItem('bridgify-balance', JSON.stringify({
+          eth: ethValue,
+          usdc: newBalance.usdc || '0',
+          usd: newBalance.usd || '0'
+        }));
+      } else if (isWalletConnected && (!currentOrders || currentOrders.length === 0)) {
+        // If no orders, reset to zero balance
+        console.log('No orders found, resetting balance to zero');
+        const zeroBalance = { eth: '0', usdc: '0', usd: '0' };
+        setBalance(zeroBalance);
+        setEthBalance('0.0000');
+        localStorage.setItem('bridgify-balance', JSON.stringify(zeroBalance));
+      }
+    };
+    
+    updateBalance();
+  }, [currentOrders, isWalletConnected, calculateBalanceFromOrders]);
+  
+  // Function to create a new order
   const createOrder = useCallback(async (orderData: any) => {
     try {
-      const newOrder = await createOrderApi(orderData);
-      if (newOrder) {
-        // The orders state will be updated by the useOrders hook,
-        // which will trigger the balance recalculation
+      const response = await fetch('/api/orders', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...orderData,
+          walletAddress: walletAddress,
+        }),
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to create order');
+      }
+      
+      const newOrder = await response.json();
+      
+      // Refresh orders to update the balance
+      if (refetchOrders) {
         await refetchOrders();
       }
+      
       return newOrder;
     } catch (error) {
-      console.error("Error in createOrder:", error);
+      console.error('Error creating order:', error);
       throw error;
     }
-  }, [createOrderApi, refetchOrders]);
+  }, [walletAddress, refetchOrders]);
 
   useEffect(() => {
     const savedDarkMode = localStorage.getItem("bridgify-dark-mode")
@@ -661,17 +721,31 @@ export default function BridgifyDashboard() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={showSellForm} onOpenChange={setShowSellForm}>
+      <Dialog open={showSellForm} onOpenChange={(open) => {
+        if (open) {
+          // Refresh orders and balance when opening the sell form
+          refetchOrders().then(() => {
+            console.log('Refreshed orders and balance for sell form');
+          });
+        }
+        setShowSellForm(open);
+      }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="sr-only">Sell Cryptocurrency</DialogTitle>
           </DialogHeader>
           <SellCryptoForm
+            key={`sell-form-${balance.eth}-${balance.usdc}`} // Force re-render when balance changes
             onClose={() => {
               setShowSellForm(false);
               refetchOrders();
             }}
-            availableBalance={{ [selectedCrypto]: ethBalance }}
+            availableBalance={{
+              eth: balance.eth,
+              usdc: balance.usdc,
+              usd: balance.usd,
+              walletAddress: walletAddress || ''
+            }}
           />
         </DialogContent>
       </Dialog>

@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -10,10 +10,17 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ArrowRight, Wallet, DollarSign, TrendingDown } from "lucide-react"
 import { useExchangeRates } from "@/hooks/use-exchange-rates"
+import { useOrders } from "@/hooks/use-orders"
 
 interface SellCryptoFormProps {
   onClose: () => void
-  availableBalance: { [key: string]: string }
+  availableBalance: {
+    eth: string
+    usdc: string
+    usd: string
+    walletAddress?: string
+    [key: string]: string | undefined
+  }
 }
 
 export function SellCryptoForm({ onClose, availableBalance }: SellCryptoFormProps) {
@@ -49,7 +56,7 @@ export function SellCryptoForm({ onClose, availableBalance }: SellCryptoFormProp
   }
 
   const handleMaxClick = () => {
-    const maxAmount = availableBalance[selectedCrypto] || "0"
+    const maxAmount = availableBalance[selectedCrypto.toLowerCase()] || "0"
     setCryptoAmount(maxAmount)
     const rate = convertCryptoPrice(selectedCrypto, selectedFiat)
     const fiat = (Number(maxAmount) * rate).toFixed(2)
@@ -62,29 +69,54 @@ export function SellCryptoForm({ onClose, availableBalance }: SellCryptoFormProp
     }
   }, [selectedCrypto, selectedFiat])
 
+  const { createOrder, refetch: refetchOrders } = useOrders(availableBalance.walletAddress)
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    
+    if (!isAmountValid || !availableBalance.walletAddress) {
+      console.error("[v0] Invalid amount or missing wallet address")
+      return
+    }
+
     setIsLoading(true)
 
-    // Simulate API call
-    await new Promise((resolve) => setTimeout(resolve, 2000))
+    try {
+      const orderData = {
+        orderType: "sell" as const,
+        cryptoCurrency: selectedCrypto,
+        fiatCurrency: selectedFiat,
+        cryptoAmount: Number.parseFloat(cryptoAmount),
+        fiatAmount: Number.parseFloat(fiatAmount),
+        exchangeRate: convertCryptoPrice(selectedCrypto, selectedFiat),
+        paymentMethod: withdrawalMethod,
+        walletAddress: availableBalance.walletAddress,
+        ratesStatus: status.status,
+      }
 
-    // In a real app, this would create a sell order in the database
-    console.log("[v0] Sell order created:", {
-      cryptoAmount,
-      fiatAmount,
-      selectedCrypto,
-      selectedFiat,
-      withdrawalMethod,
-      exchangeRate: convertCryptoPrice(selectedCrypto, selectedFiat),
-      ratesStatus: status.status,
-    })
+      const newOrder = await createOrder(orderData)
 
-    setIsLoading(false)
-    onClose()
+      if (newOrder) {
+        console.log("[v0] Sell order created successfully:", newOrder)
+        await refetchOrders()
+        onClose()
+      } else {
+        console.error("[v0] Failed to create sell order")
+        throw new Error("Failed to create sell order")
+      }
+    } catch (error) {
+      console.error("[v0] Error creating sell order:", error)
+    } finally {
+      setIsLoading(false)
+    }
   }
 
-  const isAmountValid = cryptoAmount && Number(cryptoAmount) <= Number(availableBalance[selectedCrypto] || "0")
+  const isAmountValid = useMemo(() => {
+    if (!cryptoAmount || isNaN(Number(cryptoAmount))) return false
+    const amount = Number.parseFloat(cryptoAmount)
+    const available = Number.parseFloat(availableBalance[selectedCrypto.toLowerCase()] || "0")
+    return amount > 0 && amount <= available
+  }, [cryptoAmount, selectedCrypto, availableBalance])
 
   const currentRate = convertCryptoPrice(selectedCrypto, selectedFiat)
 
@@ -133,7 +165,7 @@ export function SellCryptoForm({ onClose, availableBalance }: SellCryptoFormProp
             <div className="flex justify-between items-center text-sm">
               <span className="text-muted-foreground flex items-center">
                 <Wallet className="w-3 h-3 mr-1" />
-                Available: {availableBalance[selectedCrypto] || "0"} {selectedCrypto}
+                Available: {availableBalance[selectedCrypto.toLowerCase()] || "0"} {selectedCrypto}
               </span>
               <Button
                 type="button"
